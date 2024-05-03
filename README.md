@@ -1,25 +1,33 @@
-# ESP32 Homekit Temperature Sensor
+# ESP32 Homekit Multi Sensor
 
 ## What is it?
 
-This is a simple ESP32 WIFI connected temperature sensor based on the DHT22 Temperature/Humidity sensor. It uses the ESP32 Homekit SDK to provide a temperature sensor to the Apple Home universe. The board used with the device runs off a battery, and uses a voltage divider and a ADC input to keep tabs on the battery. The current design lasts about 2 days on a 1800ma/h LIPO battery. This is not sufficient to really be used, but requires some work or a USB power adapter to be useful. THe idea was to build a waterproof case and deploy it outside to replace the 20yo temperature/humidy display in my house with something I could ask Siri for.
+This is a simple ESP32 WIFI connected temperature, humidity, AQI, and light sensor based on the BME680 and an LDR. It can also fall back to a DHT22 with no AQI readings. It uses the ESP32 Homekit SDK to provide multiple sensors for HomeKit. There is battery support but I have disabled it as I am not using a battery.
 
 ## How this Works
 
-There is one oddity with the Espressif homekit implementation - it does not automatically connect to the WIFI network like every other Homekit devices. Most homekit devices use Bluetooth to transfer over the WIFI credentials. The ESP version does not. This means the WIFI creds must either be hard coded into the device or the user must first use the Espressif BLE or SoftAP provisioning app on a iPhone. However, this also means that the homekit configuration is much faster as the WIFI network is already setup.
+There is one oddity with the Espressif homekit implementation - it does not automatically connect to the WIFI network like every other Homekit devices. Most homekit devices use Bluetooth to transfer over the WIFI credentials. The ESP version does not. This means the WIFI creds must either be hard coded into the device or the user must first use the Espressif BLE or SoftAP provisioning app on a iPhone. However, this also means that the HomeKit configuration is much faster as the WIFI network is already setup. 
 
-The code configures the following services that make up the garage door accessory:
+The light sensor is just an LDR that caps out at 100 lux, so the effective extent of its measurements is dark room, indoor lighting, and sun.
+
+The code configures the following services that make up the accessory:
 - Temperature sensor
 - Humidity Sensor
+- AQI Sensor
+- Light Sensor
 - Battery level
 
 It borrows the from the [LIPO Battery Capacity code](https://github.com/G6EJD/LiPo_Battery_Capacity_Estimator).
 
+This version is migrated to ESP-IDF 5.0 with the new ADC driver. It uses BSEC 2.4.0.0 and the latest version of the BME68X sensor api as of 05/30/2023.
+
+esptool.py --chip esp32 p com7 erase_flash
+
 ## Setting up the Device
 
-This project is based on the ESP-IDF. Sorry, no Ardino support...nor will there every be.
+This project is based on the ESP-IDF.
 
-Make sure to run the updatemodules.sh script if you did not get the code recursively. It has a dependancy on the Espressif HomeKit SDK.
+Make sure to run the updatemodules.sh script if you did not get the code recursively. It has a dependancy on the Espressif HomeKit SDK. There is a conflict with the button library between the HomeKit SDK and the ESP-IDF-LIB! Remove the button folder in the ESP-IDF-LIB to avoid this issue.
 
 First, configure idf with menuconfig:
 
@@ -27,7 +35,7 @@ First, configure idf with menuconfig:
 idf.py menuconfig
 ```
 
-Make sure to set the GPIO pins to what you intend to use. Also, use the hard coded Homekit code, but make sure there are no duplicates on your network. If you use the WIFI Autoprovisioning (bluetooth version is recommended), this the Apple App Store and search for the Espressif BLE Provisioning tool. This will be required to configure WIFI.
+Make sure to set the GPIO pins to what you intend to use. Also, use the hard coded Homekit code, but make sure there are no duplicates on your network. If you use the WIFI Autoprovisioning (bluetooth version is recommended), this the Apple App Store and search for the Espressif BLE Provisioning tool. This will be required to configure WIFI. Some pins and settings are now also set with macros at the top of the file.
 
 Flash and run the monitor:
 

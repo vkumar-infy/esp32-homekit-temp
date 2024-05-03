@@ -1,7 +1,7 @@
 /*
- * Copyright (c) 2020 <Mark Buckaway> MIT License
+ * MIT License
  * 
- * HomeKit temp Project
+ * HomeKit temp Project with BME 680 support
  */
 
 #include <stdio.h>
@@ -18,27 +18,66 @@
 #include <hap_apple_servs.h>
 #include <hap_apple_chars.h>
 
-//#include <hap_fw_upgrade.h>
 #include <iot_button.h>
 
 #include <app_wifi.h>
 #include <app_hap_setup_payload.h>
 
-#include "driver/adc.h"
-#include "esp_adc_cal.h"
-#include <dht.h>
 
-static const dht_sensor_type_t sensor_type = DHT_TYPE_AM2301;
+#include "esp_adc/adc_oneshot.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
 
-static esp_adc_cal_characteristics_t *adc_chars;
+//libraries for BME68x support
+#include "driver/i2c.h"
+//#include "driver/i2c_master.h"
+#include "bsec_integration.h"
+#include <nvs_flash.h>
+#include <nvs.h>
+#include "bsec_iaq.h"
+#include "esp_timer.h"
+
+// Library for HD44780 Screen Support
+#include <hd44780.h>
+//#include <sys/time.h>
+
+// libraries for time keeping
+#include "esp_netif_sntp.h"
+#include "esp_sntp.h"
+
+#define I2C_MASTER_TX_BUF_DISABLE 0 /*!< I2C master doesn't need buffer */
+#define I2C_MASTER_RX_BUF_DISABLE 0 /*!< I2C master doesn't need buffer */
+#define I2C_FREQUENCY   100000
+#define I2C_GPIO_SDA    GPIO_NUM_21
+#define I2C_GPIO_SCL    GPIO_NUM_22
+#define ACTIVE_I2C      I2C_NUM_1
+
+#define SENSOR_IN_USE   1 /*!< set to 1 for BME68X and 2 for DHT */
+#define LCD1602_IN_USE 1 /* Set to 1 if LCD1602A screen is present and 0 if not*/
+#define LDR_ADC_CHANNEL 6 /* ADC channel of the photoresistor, set to 99 if not in use */
+
+static const char* sensor_binary = "sensor_blob";
+
+static bool example_adc_calibration_init(adc_unit_t unit, adc_atten_t atten, adc_cali_handle_t *out_handle);
+static void example_adc_calibration_deinit(adc_cali_handle_t handle);
+
+static adc_oneshot_unit_handle_t adc1_handle;
+static adc_cali_handle_t adc1_cali_handle = NULL;
+static bool do_calibration1;
+
 #if CONFIG_IDF_TARGET_ESP32
-static const adc_bits_width_t width = ADC_WIDTH_BIT_12;
+static const adc_bitwidth_t width = ADC_BITWIDTH_12;
 #elif CONFIG_IDF_TARGET_ESP32S2
 // 13bit ADC will cause issues with battery voltage formula
-static const adc_bits_width_t width = ADC_WIDTH_BIT_12;
+static const adc_bitwidth_t width = ADC_BITWIDTH_12;
 #endif
-static const adc_atten_t atten = ADC_ATTEN_DB_11;
-static const int32_t DEFAULT_VREF = 1100;        //Use adc2_vref_to_gpio() to obtain a better estimate
+static const adc_atten_t atten = ADC_ATTEN_DB_12;
+
+
+static int adc_raw_battery;
+static int adc_raw_LDR;
+static int voltage;
+static int adc_cali_LDR;
 
 /*  Required for server verification during OTA, PEM format as string  */
 char server_cert[] = {};
@@ -57,6 +96,440 @@ static const uint16_t RESET_NETWORK_BUTTON_TIMEOUT = 3;
 
 /* The button "Boot" will be used as the Reset button for the example */
 static const uint16_t RESET_GPIO = GPIO_NUM_0;
+
+// Stack size of the bSEC processing loop
+static const uint16_t BSEC_STACK_SIZE = 10 * 1024;
+
+
+/*!
+ * @brief           Write operation in either Wire or SPI
+ *
+ * param[in]        reg_addr        register address
+ * param[in]        reg_data_ptr    pointer to the data to be written
+ * param[in]        data_len        number of bytes to be written
+ * param[in]        intf_ptr        interface pointer
+ *
+ * @return          result of the bus communication function
+ */
+int8_t bus_write(uint8_t reg_addr, const uint8_t *reg_data_ptr, uint32_t data_len, void *intf_ptr)
+{
+    // ...
+    // Please insert system specific function to write to the bus where BME68x is connected
+    // ...
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    assert(data_len > 0 && reg_data_ptr != NULL); // Safeguarding the assumptions
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (0x76 << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, reg_addr, true);
+    i2c_master_write(cmd, reg_data_ptr, data_len, true);
+    i2c_master_stop(cmd);
+    esp_err_t ret = i2c_master_cmd_begin(ACTIVE_I2C, cmd, pdMS_TO_TICKS(1000));
+    i2c_cmd_link_delete(cmd);
+    // ESP_OK matches with the function success code (0)
+    return (int8_t)ret;
+    return 0;
+}
+/*!
+ * @brief           Read operation in either Wire or SPI
+ *
+ * param[in]        reg_addr        register address
+ * param[out]       reg_data_ptr    pointer to the memory to be used to store the read data
+ * param[in]        data_len        number of bytes to be read
+ * param[in]        intf_ptr        interface pointer
+ * 
+ * @return          result of the bus communication function
+ */
+int8_t bus_read(uint8_t reg_addr, uint8_t *reg_data_ptr, uint32_t data_len, void *intf_ptr)
+{
+    // ...
+    // Please insert system specific function to read from bus where BME68x is connected
+    // ...
+    // ...
+    // Please insert system specific function to read from bus where BME680 is connected
+    // ...
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+
+    assert(data_len > 0 && reg_data_ptr != NULL); // Safeguarding the assumptions
+    // Feeding the command in
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (0x76 << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, reg_addr, true);
+
+    //bme680_sleep(150);
+    // Reading data back
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (0x76 << 1) | I2C_MASTER_READ, true);
+    if (data_len > 1) {
+        i2c_master_read(cmd, reg_data_ptr, data_len - 1, I2C_MASTER_ACK);
+    }
+    i2c_master_read_byte(cmd, reg_data_ptr + data_len - 1, I2C_MASTER_NACK);
+    i2c_master_stop(cmd);
+    esp_err_t ret = i2c_master_cmd_begin(ACTIVE_I2C, cmd, pdMS_TO_TICKS(1000));
+    i2c_cmd_link_delete(cmd);
+    // ESP_OK matches with the function success code (0)
+    return (int8_t)ret;
+    //return 0;
+}
+
+
+
+
+
+/*!
+ * @brief           System specific implementation of sleep function
+ *
+ * @param[in]       t_us     Time in microseconds
+ * @param[in]       intf_ptr Pointer to the interface descriptor
+ * 
+ * @return          none
+ */
+static void bme680_sleep(uint32_t t_us, void *intf_ptr)
+{
+    // ...
+    // Please insert system specific function sleep or delay for t_ms milliseconds
+    // ...
+    vTaskDelay(pdMS_TO_TICKS(t_us/10));
+}
+/*!
+ * @brief           Handling of the ready outputs
+ *
+ * @param[in]       timestamp               time in nanoseconds
+ * @param[in]       iaq                     Indoor-air-quality estimate [0-500]
+ * @param[in]       iaq_accuracy            Indoor-air-quality accuracy
+ * @param[in]       siaq                    Unscaled indoor-air-quality estimate
+ * @param[in]       siaq_accuracy           Unscaled indoor-air-quality accuracy
+ * @param[in]       compensateTemperature   Sensor heat compensated temperature [degrees Celsius]
+ * @param[in]       compensateHumidity      Sensor heat compensated humidity [%]
+ * @param[in]       raw_pressure            Pressure sensor signal [Pa]
+ * @param[in]       raw_temp                Temperature sensor signal [degrees Celsius]
+ * @param[in]       raw_humidity            Relative humidity sensor signal [%]
+ * @param[in]       raw_gas                 Gas sensor signal [Ohm]
+ * @param[in]       co2                     CO2 equivalent estimate [ppm]
+ * @param[in]       bsec_status             value returned by the bsec_do_steps() call
+ *
+ * @return          none
+ */
+static float BME68xtemperature = 0.0;
+static float BME68xhumidity = 0.0;
+static float BME68xsIAQ = 0.0;
+static float BME68xdIAQ = 0.0;
+static float BME68xC02 = 0.0;
+static float BME68xbVOC = 0.0;
+
+
+static hd44780_t lcd = {
+    .write_cb = NULL,
+    .font = HD44780_FONT_5X8,
+    .lines = 2,
+    .pins = {
+        .rs = GPIO_NUM_19,
+        .e  = GPIO_NUM_23,
+        .d4 = GPIO_NUM_18,
+        .d5 = GPIO_NUM_17,
+        .d6 = GPIO_NUM_16,
+        .d7 = GPIO_NUM_15,
+        .bl = HD44780_NOT_USED
+    }
+};
+
+time_t now;
+char strftime_buf[64];
+struct tm timeinfo;
+char line1[17];
+char line2[17];
+
+void output_ready(int64_t timestamp, float iaq, uint8_t iaq_accuracy, float siaq, uint8_t siaq_accuracy, float compensateTemperature, float compensateHumidity,
+     float raw_pressure, float raw_temp, float raw_humidity, float raw_gas, float co2, float bVOC, bsec_library_return_t bsec_status) {
+    // ...
+    // Please insert system specific code to further process or display the BSEC outputs
+    // ...
+
+    BME68xtemperature = compensateTemperature;
+    BME68xhumidity = compensateHumidity;
+    BME68xsIAQ = siaq;
+    BME68xdIAQ = iaq;
+    BME68xC02 = co2;
+    BME68xbVOC = bVOC;
+    
+    ESP_LOGI("BME 680", "[timestamp: %"PRId64"] [IAQ reading: %f] [IAQ Accuracy: %d] [SIAQ reading: %f] [sIAQ Accuracy: %d] [Compensated Temperature: %f] [Compensated Humidity: %f] [raw_pressure: %f] [raw_temp: %f] [raw_humidity: %f] [raw_gas: %f] [co2_equivalent: %f] [bVOC: %f] [bsec_status: %d]\n", timestamp, iaq, iaq_accuracy, siaq, siaq_accuracy, compensateTemperature, compensateHumidity, raw_pressure, raw_temp, raw_humidity, raw_gas, co2, bVOC, bsec_status);
+
+    ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, LDR_ADC_CHANNEL, &adc_raw_LDR));
+    ESP_LOGI(TAG, "ADC%d Channel[%d] LDR Raw Data: %d", ADC_UNIT_1 + 1, LDR_ADC_CHANNEL, adc_raw_LDR);
+    // for this use case, raw data is more useful. this ldr is pretty useless for this though
+    if (do_calibration1) {
+        ESP_ERROR_CHECK(adc_cali_raw_to_voltage(adc1_cali_handle, adc_raw_LDR, &adc_cali_LDR));
+        ESP_LOGI(TAG, "ADC%d Channel[%d] Cali LDR Voltage: %d mV", ADC_UNIT_1 + 1, LDR_ADC_CHANNEL, adc_cali_LDR);
+    }
+
+    time(&now);
+    // Set timezone to PST
+    localtime_r(&now, &timeinfo);
+    strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo);
+    ESP_LOGI(TAG, "time in reno: %s", strftime_buf);
+    // Print out results to HD44780 Screen
+    if(timeinfo.tm_hour > 12) {
+        snprintf(line1, (volatile size_t){sizeof(line1)}, "%.2lfF   %d:%02d PM", ((BME68xtemperature * 9 / 5) + 32), timeinfo.tm_hour - 12, timeinfo.tm_min);
+    } else if (timeinfo.tm_hour == 12)
+        snprintf(line1, (volatile size_t){sizeof(line1)}, "%.2lfF   %d:%02d PM", ((BME68xtemperature * 9 / 5) + 32), timeinfo.tm_hour, timeinfo.tm_min);
+    else {
+        snprintf(line1, (volatile size_t){sizeof(line1)}, "%.2lfF   %d:%d AM", ((BME68xtemperature * 9 / 5) + 32), timeinfo.tm_hour, timeinfo.tm_min);
+    }
+    hd44780_gotoxy(&lcd, 0, 0);
+    hd44780_puts(&lcd, line1);
+
+    hd44780_gotoxy(&lcd, 0, 1);
+        snprintf(line2, (volatile size_t){sizeof(line2)}, "%d%% %dAQI %02d-%02d", (int)round(BME68xhumidity), (int)round(BME68xdIAQ), timeinfo.tm_mon + 1, timeinfo.tm_mday);
+    hd44780_puts(&lcd, line2);
+
+}
+
+
+/* 
+ * In an actual accessory, this should read from hardware.
+ * Read routines are generally not required as the value is available with th HAP core
+ * when it is updated from write routines. For external triggers (like fan switched on/off
+ * using physical button), accessories should explicitly call hap_char_update_val()
+ * instead of waiting for a read request.
+ */
+
+float bm68xtempReturn(hap_char_t *hc, hap_status_t *status_code, void *serv_priv, void *read_priv) {
+    if (hap_req_get_ctrl_id(read_priv)) {
+        ESP_LOGI(TAG, "temp sensor received read from %s", hap_req_get_ctrl_id(read_priv));
+    }
+
+    if (!strcmp(hap_char_get_type_uuid(hc), HAP_CHAR_UUID_CURRENT_TEMPERATURE))
+    {
+        hap_val_t new_val;
+        new_val.f = BME68xtemperature;
+        hap_char_update_val(hc, &new_val);
+        *status_code = HAP_STATUS_SUCCESS;
+        ESP_LOGI(TAG,"temp status updated to %0.01f", new_val.f);
+    }
+
+    return HAP_SUCCESS;
+}
+
+float bm68xhumidReturn(hap_char_t *hc, hap_status_t *status_code, void *serv_priv, void *read_priv) {
+    if (hap_req_get_ctrl_id(read_priv)) {
+        ESP_LOGI(TAG, "temp sensor received read from %s", hap_req_get_ctrl_id(read_priv));
+    }
+
+    if (!strcmp(hap_char_get_type_uuid(hc), HAP_CHAR_UUID_CURRENT_RELATIVE_HUMIDITY)) 
+    {
+        hap_val_t new_val;
+        new_val.f = BME68xhumidity;
+        hap_char_update_val(hc, &new_val);
+        *status_code = HAP_STATUS_SUCCESS;
+        ESP_LOGI(TAG,"humidity status updated to %0.01f%%", new_val.f);
+    }
+
+    return HAP_SUCCESS;
+}
+
+int bm68xIAQReturn(hap_char_t *hc, hap_status_t *status_code, void *serv_priv, void *read_priv) {
+    if (hap_req_get_ctrl_id(read_priv)) {
+        ESP_LOGI(TAG, "temp sensor received read from %s", hap_req_get_ctrl_id(read_priv));
+    }
+
+    if (!strcmp(hap_char_get_type_uuid(hc), HAP_CHAR_UUID_AIR_QUALITY)) 
+    {
+        hap_val_t new_val;
+        if (round(BME68xsIAQ) <= 50) {
+            new_val.u = 1;
+        } else if (round(BME68xsIAQ) <= 100) {
+            new_val.u = 2;
+        }
+        else if (round(BME68xsIAQ) <= 150) {
+            new_val.u = 3;
+        }
+        else if (round(BME68xsIAQ) <= 200) {
+            new_val.u = 4;
+        }
+        else {
+            new_val.u = 5;
+        }
+        
+        hap_char_update_val(hc, &new_val);
+        *status_code = HAP_STATUS_SUCCESS;
+        ESP_LOGI(TAG, "IAQ status updated to %"PRIu32, new_val.u);
+    }
+    if (!strcmp(hap_char_get_type_uuid(hc), HAP_CHAR_UUID_CARBON_DIOXIDE_LEVEL)) 
+    {
+        hap_val_t new_val;
+        new_val.f = BME68xC02;
+        hap_char_update_val(hc, &new_val);
+        *status_code = HAP_STATUS_SUCCESS;
+        ESP_LOGI(TAG, "CO2 PPM value updated to %0.01f", new_val.f);
+    }   
+    if (!strcmp(hap_char_get_type_uuid(hc), HAP_CHAR_UUID_VOC_DENSITY)) 
+    {
+        hap_val_t new_val;
+        new_val.f = BME68xbVOC + 1; 
+        hap_char_update_val(hc, &new_val);
+        *status_code = HAP_STATUS_SUCCESS;
+        ESP_LOGI(TAG, "VOC value updated to %0.01f", new_val.f);
+    }       
+
+    return HAP_SUCCESS;
+}
+
+float ldrVoltageReturn(hap_char_t *hc, hap_status_t *status_code, void *serv_priv, void *read_priv) {
+    if (hap_req_get_ctrl_id(read_priv)) {
+        ESP_LOGI(TAG, "LDR sensor received read from %s", hap_req_get_ctrl_id(read_priv));
+    }
+
+    if (!strcmp(hap_char_get_type_uuid(hc), HAP_CHAR_UUID_CURRENT_AMBIENT_LIGHT_LEVEL)) 
+    {
+        hap_val_t new_val;
+        new_val.f = (int)adc_raw_LDR;
+        if (new_val.f >= 750) {
+            new_val.f = new_val.f + 300;
+        }
+        new_val.f = new_val.f / 10;
+        hap_char_update_val(hc, &new_val);
+        *status_code = HAP_STATUS_SUCCESS;
+        ESP_LOGI(TAG,"LDR status updated to %0.01f%%", new_val.f);
+    }
+
+    return HAP_SUCCESS;
+}
+
+
+/*!
+ * @brief           Load previous library state from non-volatile memory
+ *
+ * @param[in,out]   state_buffer    buffer to hold the loaded state string
+ * @param[in]       n_buffer        size of the allocated state buffer
+ *
+ * @return          number of bytes copied to state_buffer
+ */
+
+//uint32_t state_load(uint8_t *state_buffer, uint32_t n_buffer)
+uint32_t state_load(uint8_t *state_buffer, size_t n_buffer)
+{
+    // ...
+    // Load a previous library state from non-volatile memory, if available.
+    //
+    // Return zero if loading was unsuccessful or no state was available,
+    // otherwise return length of loaded state string.
+    // ...
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open("state", NVS_READONLY, &my_handle);
+    //ESP_ERROR_CHECK( err );
+
+    err = nvs_get_blob(my_handle, sensor_binary, state_buffer, &n_buffer);
+    // We close this anyway even if the operation didn't succeed.
+    nvs_close(my_handle);
+    if (err == ESP_OK){
+        return n_buffer;
+    }
+    ESP_LOGW(TAG, "loading sensor binary blob failed with code %d", err);
+    return 0;
+}
+
+/*!
+ * @brief           Save library state to non-volatile memory
+ *
+ * @param[in]       state_buffer    buffer holding the state to be stored
+ * @param[in]       length          length of the state string to be stored
+ *
+ * @return          none
+ */
+void state_save(const uint8_t *state_buffer, uint32_t length)
+{
+    // ...
+    // Save the string some form of non-volatile memory, if possible.
+    // ...
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open("state", NVS_READWRITE, &my_handle);
+    ESP_ERROR_CHECK( err );
+
+    err = nvs_set_blob(my_handle, sensor_binary, state_buffer, length);
+    ESP_ERROR_CHECK( err );
+    err = nvs_commit(my_handle);
+    ESP_ERROR_CHECK(err);
+    nvs_close(my_handle);
+}
+
+/*!
+ * @brief           Load library config from non-volatile memory
+ *
+ * @param[in,out]   config_buffer    buffer to hold the loaded state string
+ * @param[in]       n_buffer        size of the allocated state buffer
+ *
+ * @return          number of bytes copied to config_buffer
+ */
+uint32_t config_load(uint8_t *config_buffer, uint32_t n_buffer)
+{
+    // ...
+    // Load a library config from non-volatile memory, if available.
+    //
+    // Return zero if loading was unsuccessful or no config was available,
+    // otherwise return length of loaded config string.
+    // ...
+    ESP_LOGI(TAG, "Loading configuration: buffer-size %" PRIu32 "  config size %d", n_buffer, sizeof(bsec_config_iaq));
+    assert(n_buffer >= sizeof(bsec_config_iaq));
+    memcpy(config_buffer, bsec_config_iaq, sizeof(bsec_config_iaq));
+
+    return sizeof(bsec_config_iaq);
+}
+
+
+static esp_err_t i2c_master_init(void)
+{
+    i2c_config_t conf = {
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = I2C_GPIO_SDA,
+        .scl_io_num = I2C_GPIO_SCL,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = I2C_FREQUENCY,
+    };
+    i2c_param_config(ACTIVE_I2C, &conf);
+    return i2c_driver_install(ACTIVE_I2C, conf.mode,
+                              I2C_MASTER_RX_BUF_DISABLE,
+                              I2C_MASTER_TX_BUF_DISABLE, 0);
+}
+
+
+/*!
+ * @brief       Main function which configures BSEC library and then reads and processes the data from sensor based
+ *              on timer ticks
+ *
+ * @return      result of the processing
+ */
+int initialize_sensor()
+{
+    return_values_init ret;
+    esp_err_t err = i2c_master_init();
+    ESP_ERROR_CHECK( err );
+    
+    struct bme68x_dev bme_dev;
+	memset(&bme_dev,0,sizeof(bme_dev)); 
+ 
+    ESP_LOGI(TAG, "I2C initialized");
+    /* Call to the function which initializes the BSEC library BSEC_SAMPLE_RATE_SCAN
+     * Switch on low-power mode and provide no temperature offset BSEC_SAMPLE_RATE_LP */ //BSEC_SAMPLE_RATE_ULP
+    //void bsec_iot_init(float sample_rate, float temperature_offset, bme68x_write_fptr_t bus_write, bme68x_read_fptr_t bus_read, sleep_fct sleep_n, state_load_fct state_load, config_load_fct config_load, struct bme68x_dev dev);
+    ret = bsec_iot_init(BSEC_SAMPLE_RATE_LP, 2.0f, bus_write, bus_read, bme680_sleep, state_load, config_load, bme_dev);
+    if (ret.bme68x_status)
+    {
+        /* Could not initialize BME680 */
+        ESP_LOGE(TAG, "initializing BME680 failed %d", ret.bme68x_status);
+        return (int)ret.bme68x_status;
+    }
+    else if (ret.bsec_status)
+    {
+        /* Could not intialize BSEC library */
+        ESP_LOGE(TAG, "initializing BSEC failed %d", ret.bsec_status);
+        return (int)ret.bsec_status;
+    }
+    return 0;
+}
+
+
+
+
 
 
 /**
@@ -90,12 +563,25 @@ static void reset_key_init(uint32_t key_gpio_pin)
 static uint8_t get_battery_level(void)
 {
     float percentage = 100;
-    uint32_t adc_reading = adc1_get_raw((adc1_channel_t)CONFIG_BATTERY_ADC_CHANNEL);
-    uint32_t voltage = esp_adc_cal_raw_to_voltage(adc_reading, adc_chars);
+    ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, CONFIG_BATTERY_ADC_CHANNEL, &adc_raw_battery
+));
+    ESP_LOGI(TAG, "ADC%d Channel[%d] Raw Data: %d", ADC_UNIT_1 + 1, CONFIG_BATTERY_ADC_CHANNEL, adc_raw_battery
+);
+    if (do_calibration1) {
+        ESP_ERROR_CHECK(adc_cali_raw_to_voltage(adc1_cali_handle, adc_raw_battery
+    , &voltage));
+        ESP_LOGI(TAG, "ADC%d Channel[%d] Cali Voltage: %d mV", ADC_UNIT_1 + 1, CONFIG_BATTERY_ADC_CHANNEL, voltage);
+    }
+
+
+    //I don't use battery, so
+    voltage = 5000;
+
     // Voltage is half because of the divide resistors. ADC max's out at 2.8V
     voltage*=2;
     float voltage_f = (float)(voltage) / 1000.0;
-    ESP_LOGI(TAG, "Battery Level Raw: %d\tVoltage: %dmV (%0.02fV)", adc_reading, voltage, voltage_f);
+    ESP_LOGI(TAG, "Battery Level Raw: %d\tVoltage: %dmV (%0.02fV)", adc_raw_battery
+, voltage, voltage_f);
     percentage = (2808.3808 * pow(voltage_f, 4)) - (43560.9157 * pow(voltage_f, 3)) + (252848.5888 * pow(voltage_f, 2)) - (650767.4615 * voltage_f) + 626532.5703;
     if (voltage_f > 4.19) percentage = 100.0;
     else if (voltage_f <= 3.50) percentage = 0.0;
@@ -117,7 +603,7 @@ static int temp_identify(hap_acc_t *ha)
  * An optional HomeKit Event handler which can be used to track HomeKit
  * specific events.
  */
-static void temp_hap_event_handler(void* arg, esp_event_base_t event_base, int event, void *data)
+static void temp_hap_event_handler(void* arg, esp_event_base_t event_base, int32_t event, void *data)
 {
     switch(event) {
         case HAP_EVENT_PAIRING_STARTED :
@@ -151,73 +637,8 @@ static void temp_hap_event_handler(void* arg, esp_event_base_t event_base, int e
     }
 }
 
-/* 
- * In an actual accessory, this should read from hardware.
- * Read routines are generally not required as the value is available with th HAP core
- * when it is updated from write routines. For external triggers (like fan switched on/off
- * using physical button), accessories should explicitly call hap_char_update_val()
- * instead of waiting for a read request.
- */
-static int temp_read(hap_char_t *hc, hap_status_t *status_code, void *serv_priv, void *read_priv)
-{
-    static float temperature = 0.0;
-    static float humidity = 0.0;
 
-    if (hap_req_get_ctrl_id(read_priv)) {
-        ESP_LOGI(TAG, "temp sensor received read from %s", hap_req_get_ctrl_id(read_priv));
-    }
 
-    // Only update the sensor info on a temperature read since they are read one after another
-    if (!strcmp(hap_char_get_type_uuid(hc), HAP_CHAR_UUID_CURRENT_TEMPERATURE)) 
-    {
-        hap_val_t new_val;
-
-        if (dht_read_float_data(sensor_type, CONFIG_GPIO_OUTPUT_IO_DHT22, &humidity, &temperature) == ESP_OK)
-            ESP_LOGI(TAG, "Read Temp: %0.01fC Humidity: %0.01f%% ", temperature, humidity);
-        else
-            ESP_LOGE(TAG, "Could not read data from DHT sensor on GPIO %d", CONFIG_GPIO_OUTPUT_IO_DHT22);
-
-        new_val.f = temperature;
-        hap_char_update_val(hc, &new_val);
-        *status_code = HAP_STATUS_SUCCESS;
-        ESP_LOGI(TAG,"temp status updated to %0.01f", new_val.f);
-    }
-    if (!strcmp(hap_char_get_type_uuid(hc), HAP_CHAR_UUID_CURRENT_RELATIVE_HUMIDITY)) 
-    {
-        hap_val_t new_val;
-        new_val.f = humidity;
-        hap_char_update_val(hc, &new_val);
-        *status_code = HAP_STATUS_SUCCESS;
-        ESP_LOGI(TAG,"humidity status updated to %0.01f%%", new_val.f);
-    }
-    if (!strcmp(hap_char_get_type_uuid(hc), HAP_CHAR_UUID_BATTERY_LEVEL)) 
-    {
-        hap_val_t new_val;
-        new_val.i = get_battery_level();
-        hap_char_update_val(hc, &new_val);
-        *status_code = HAP_STATUS_SUCCESS;
-        ESP_LOGI(TAG, "battery level updated to %d", new_val.i);
-    }
-    if (!strcmp(hap_char_get_type_uuid(hc), HAP_CHAR_UUID_STATUS_LOW_BATTERY)) 
-    {
-        hap_val_t new_val;
-        uint8_t battery_level = get_battery_level();
-        new_val.i = battery_level<25?1:0;
-        hap_char_update_val(hc, &new_val);
-        *status_code = HAP_STATUS_SUCCESS;
-        ESP_LOGI(TAG, "battery low level updated to %d (%s)", new_val.i, new_val.i?"low battery":"battery ok");
-    }
-    if (!strcmp(hap_char_get_type_uuid(hc), HAP_CHAR_UUID_CHARGING_STATE)) 
-    {
-        hap_val_t new_val;
-        // Figure out if we are charging, and update this info.
-        new_val.i = 0;
-        hap_char_update_val(hc, &new_val);
-        *status_code = HAP_STATUS_SUCCESS;
-        ESP_LOGI(TAG, "battery charging state updated");
-    }
-    return HAP_SUCCESS;
-}
 
 /**
  * @brief Main Thread to handle setting up the service and accessories for the GarageDoor
@@ -228,20 +649,43 @@ static void temp_thread_entry(void *p)
     hap_serv_t *tempservice = NULL;
     hap_serv_t *humidityservice = NULL;
     hap_serv_t *battery_service = NULL;
+    hap_serv_t *ldrService = NULL;
+    
+
+    hap_serv_t *aqiService = NULL;
+    hap_char_t *VOCService = NULL;
+    hap_char_t *co2Service = NULL;
+
     int adc_gpio_num = 0;
     float temperature = 0.0;
     float humidity = 0.0;
-
-    /*
+    int aqiReading = 0;
+    float vocReading = 0;
+    float co2Reading = 0;
+    float luxVoltReading = 0;
+    /*BME68xC02;BME68xbVOC;
      * Configure the ADC for reading battery level
      */
 
     ESP_LOGI(TAG, "configuring ADC for battery level");
-    adc1_config_width(width);
-    adc1_config_channel_atten(CONFIG_BATTERY_ADC_CHANNEL, atten);
-    adc1_pad_get_io_num( CONFIG_BATTERY_ADC_CHANNEL, &adc_gpio_num );
-    adc_chars = calloc(1, sizeof(esp_adc_cal_characteristics_t));
-    esp_adc_cal_characterize(ADC_UNIT_1, atten, width, DEFAULT_VREF, adc_chars);
+    // new implementation
+    //-------------ADC1 Init---------------//
+
+    adc_oneshot_unit_init_cfg_t init_config1 = {
+        .unit_id = ADC_UNIT_1,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config1, &adc1_handle));
+
+    //-------------ADC1 Config---------------//
+    adc_oneshot_chan_cfg_t config = {
+        .bitwidth = width,
+        .atten = atten,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, CONFIG_BATTERY_ADC_CHANNEL, &config));
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, LDR_ADC_CHANNEL, &config));
+
+    //-------------ADC1 Calibration Init---------------//
+    do_calibration1 = example_adc_calibration_init(ADC_UNIT_1, atten, &adc1_cali_handle);
     ESP_LOGI(TAG, "Battery Level ADC running on GPIO %d", adc_gpio_num);
 
     /* Configure HomeKit core to make the Accessory name (and thus the WAC SSID) unique,
@@ -264,7 +708,7 @@ static void temp_thread_entry(void *p)
         .name = "Esp-Term",
         .manufacturer = "Espressif",
         .model = "EspTermp01",
-        .serial_num = "001122334455",
+        .serial_num = "001122334477",
         .fw_rev = "1.0.0",
         .hw_rev =  (char*)esp_get_idf_version(),
         .pv = "1.0.0",
@@ -278,37 +722,64 @@ static void temp_thread_entry(void *p)
     /* Add a dummy Product Data */
     uint8_t product_data[] = {'E','S','P','3','2','H','A','P'};
     hap_acc_add_product_data(tempaccessory, product_data, sizeof(product_data));
+    temperature = BME68xtemperature;
+    humidity = BME68xhumidity;
 
-    if (dht_read_float_data(sensor_type, CONFIG_GPIO_OUTPUT_IO_DHT22, &humidity, &temperature) == ESP_OK)
-        ESP_LOGI(TAG, "Sensor Read: Temperature: %0.01f Humidity: %0.01f", temperature, humidity);
-    else
-        ESP_LOGE(TAG, "Could not read data from sensor on GPIO %d\n", CONFIG_GPIO_OUTPUT_IO_DHT22);
+
     
-    ESP_LOGI(TAG, "Creating temperture service (current temp: %0.01fC)", temperature);
+    ESP_LOGI(TAG, "Creating temperature service (current temp: %0.01fC)", temperature);
     /* Create the temp Service. Include the "name" since this is a user visible service  */
     tempservice = hap_serv_temperature_sensor_create(temperature);
     hap_serv_add_char(tempservice, hap_char_name_create("ESP Temperature Sensor"));
     /* Set the read callback for the service (optional) */
-    hap_serv_set_read_cb(tempservice, temp_read);
-    /* Add the Garage Service to the Accessory Object */
+    hap_serv_set_read_cb(tempservice, bm68xtempReturn);
+
+    /* Add the temp Service to the Accessory Object */
     hap_acc_add_serv(tempaccessory, tempservice);
+
 
     ESP_LOGI(TAG, "Creating humidity service (current humidity: %0.01f%%)", humidity);
     /* Create the temp Service. Include the "name" since this is a user visible service  */
     humidityservice = hap_serv_humidity_sensor_create(humidity);
     hap_serv_add_char(humidityservice, hap_char_name_create("ESP Humidity Sensor"));
     /* Set the read callback for the service (optional) */
-    hap_serv_set_read_cb(humidityservice, temp_read);
-    /* Add the Garage Service to the Accessory Object */
+    hap_serv_set_read_cb(humidityservice, bm68xhumidReturn);
+
+    /* Add the humidity Service to the Accessory Object */
     hap_acc_add_serv(tempaccessory, humidityservice);
 
+    // DHT line of sensors do not support AQI 
+    ESP_LOGI(TAG, "Creating AQI service (current humidity: %d)", aqiReading);
+    /* Create the aqi Service. Include the "name" since this is a user visible service  */
+    aqiService = hap_serv_air_quality_sensor_create(aqiReading);
+    VOCService = hap_char_voc_density_create(vocReading);
+    co2Service = hap_char_carbon_dioxide_level_create(co2Reading);
+    hap_serv_add_char(aqiService, hap_char_name_create("ESP AQI Sensor"));
+    hap_serv_add_char(aqiService, co2Service);
+    hap_serv_add_char(aqiService, VOCService);
+    /* Set the read callback for the service (optional) */
+    hap_serv_set_read_cb(aqiService, bm68xIAQReturn);
+    /* Add the AQI Service to the Accessory Object */
+    hap_acc_add_serv(tempaccessory, aqiService);
 
+
+    if (LDR_ADC_CHANNEL != 99) {
+        ESP_LOGI(TAG, "Creating Lux service (current mV of LDR: %f)", luxVoltReading);
+        /* Create the Lux Service. Include the "name" since this is a user visible service  */
+        ldrService = hap_serv_light_sensor_create(luxVoltReading);
+        hap_serv_add_char(ldrService, hap_char_name_create("ESP LDR Sensor"));
+        /* Set the read callback for the service (optional) */
+        hap_serv_set_read_cb(ldrService, ldrVoltageReturn);
+        /* Add the AQI Service to the Accessory Object */
+        hap_acc_add_serv(tempaccessory, ldrService);
+    }    
+
+    
     u_int8_t battery_level = get_battery_level();
     ESP_LOGI(TAG, "Creating battery service (current battery level: %d)", battery_level);
     // Create the CloseIf switch
     battery_service = hap_serv_battery_service_create(battery_level, 0, (battery_level<25)?1:0);
     hap_serv_add_char(battery_service, hap_char_name_create("ESP Battery Level"));
-    hap_serv_set_read_cb(battery_service, temp_read);
     hap_acc_add_serv(tempaccessory, battery_service);
 
 
@@ -373,6 +844,7 @@ static void temp_thread_entry(void *p)
 
     /* After all the initializations are done, start the HAP core */
     ESP_LOGI(TAG, "Starting HAP...");
+    //hap_http_debug_enable();
     hap_start();
 
     /* Start Wi-Fi */
@@ -384,10 +856,84 @@ static void temp_thread_entry(void *p)
     vTaskDelete(NULL);
 }
 
+
+
+static void bSECReadTask(void *p)
+{
+    ESP_LOGI(TAG, "entered BME 680 sensor read loop");
+    initialize_sensor();
+    bsec_iot_loop(bme680_sleep, esp_timer_get_time, output_ready, state_save, 10000);
+    /* The task won't end. It should stay in the bsec_iot_loop. */
+    vTaskDelete(NULL);
+}
+
+
+// ADC calibration init function declaration
+// ripped from https://github.com/espressif/esp-idf/blob/release/v5.0/examples/peripherals/adc/oneshot_read/main/oneshot_read_main.c
+static bool example_adc_calibration_init(adc_unit_t unit, adc_atten_t atten, adc_cali_handle_t *out_handle)
+{
+    adc_cali_handle_t handle = NULL;
+    esp_err_t ret = ESP_FAIL;
+    bool calibrated = false;
+
+#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
+    if (!calibrated) {
+        ESP_LOGI(TAG, "calibration scheme version is %s", "Curve Fitting");
+        adc_cali_curve_fitting_config_t cali_config = {
+            .unit_id = unit,
+            .atten = atten,
+            .bitwidth = width,
+        };
+        ret = adc_cali_create_scheme_curve_fitting(&cali_config, &handle);
+        if (ret == ESP_OK) {
+            calibrated = true;
+        }
+    }
+#endif
+
+#if ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
+    if (!calibrated) {
+        ESP_LOGI(TAG, "calibration scheme version is %s", "Line Fitting");
+        adc_cali_line_fitting_config_t cali_config = {
+            .unit_id = unit,
+            .atten = atten,
+            .bitwidth = width,
+        };
+        ret = adc_cali_create_scheme_line_fitting(&cali_config, &handle);
+        if (ret == ESP_OK) {
+            calibrated = true;
+        }
+    }
+#endif
+
+    *out_handle = handle;
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Calibration Success");
+    } else if (ret == ESP_ERR_NOT_SUPPORTED || !calibrated) {
+        ESP_LOGW(TAG, "eFuse not burnt, skip software calibration");
+    } else {
+        ESP_LOGE(TAG, "Invalid arg or no memory");
+    }
+
+    return calibrated;
+}
+
+static void example_adc_calibration_deinit(adc_cali_handle_t handle)
+{
+#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
+    ESP_LOGI(TAG, "deregister %s calibration scheme", "Curve Fitting");
+    ESP_ERROR_CHECK(adc_cali_delete_scheme_curve_fitting(handle));
+
+#elif ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
+    ESP_LOGI(TAG, "deregister %s calibration scheme", "Line Fitting");
+    ESP_ERROR_CHECK(adc_cali_delete_scheme_line_fitting(handle));
+#endif
+}
+
 void app_main()
 {
     ESP_LOGI(TAG, "[APP] Startup...");
-    ESP_LOGI(TAG, "[APP] Free memory: %d bytes", esp_get_free_heap_size());
+    ESP_LOGI(TAG, "[APP] Free memory: %" PRIu32 " bytes", esp_get_free_heap_size());
     ESP_LOGI(TAG, "[APP] IDF version: %s", esp_get_idf_version());
 
     esp_log_level_set("*", ESP_LOG_INFO);
@@ -396,7 +942,29 @@ void app_main()
     esp_log_level_set("TRANSPORT", ESP_LOG_VERBOSE);
     esp_log_level_set("OUTBOX", ESP_LOG_VERBOSE);
 
+    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    esp_netif_sntp_init(&config);
+
+    setenv("TZ", "PST8PDT", 1);
+    tzset();
+
     ESP_LOGI(TAG, "[APP] Creating main thread...");
 
     xTaskCreate(temp_thread_entry, temp_TASK_NAME, temp_TASK_STACKSIZE, NULL, temp_TASK_PRIORITY, NULL);
+
+    // task to poll bme680 sensor and initialize it 
+    if (SENSOR_IN_USE == 1) {
+        xTaskCreate(bSECReadTask, "bSECSensorPoll", BSEC_STACK_SIZE, NULL, temp_TASK_PRIORITY, NULL);
+    }
+
+    if (LCD1602_IN_USE == 1){
+        ESP_ERROR_CHECK(hd44780_init(&lcd));
+    }
+    
 }
+
+
+
+
+
+
