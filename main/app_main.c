@@ -24,9 +24,9 @@
 #include <app_hap_setup_payload.h>
 
 
-#include "esp_adc/adc_oneshot.h"
-#include "esp_adc/adc_cali.h"
-#include "esp_adc/adc_cali_scheme.h"
+//#include "esp_adc/adc_oneshot.h"
+//#include "esp_adc/adc_cali.h"
+//#include "esp_adc/adc_cali_scheme.h"
 
 //libraries for BME68x support
 #include "driver/i2c.h"
@@ -48,30 +48,30 @@
 #define I2C_MASTER_TX_BUF_DISABLE 0 /*!< I2C master doesn't need buffer */
 #define I2C_MASTER_RX_BUF_DISABLE 0 /*!< I2C master doesn't need buffer */
 #define I2C_FREQUENCY   100000
-#define I2C_GPIO_SDA    GPIO_NUM_21
-#define I2C_GPIO_SCL    GPIO_NUM_22
-#define ACTIVE_I2C      I2C_NUM_1
+#define I2C_GPIO_SDA    18
+#define I2C_GPIO_SCL    19
+#define ACTIVE_I2C      I2C_NUM_0
 
 #define SENSOR_IN_USE   1 /*!< set to 1 for BME68X and 2 for DHT */
-#define LCD1602_IN_USE 1 /* Set to 1 if LCD1602A screen is present and 0 if not*/
-#define LDR_ADC_CHANNEL 6 /* ADC channel of the photoresistor, set to 99 if not in use */
+#define LCD1602_IN_USE 0 /* Set to 1 if LCD1602A screen is present and 0 if not*/
+#define LDR_ADC_CHANNEL 99 /* ADC channel of the photoresistor, set to 99 if not in use */
 
 static const char* sensor_binary = "sensor_blob";
 
-static bool example_adc_calibration_init(adc_unit_t unit, adc_atten_t atten, adc_cali_handle_t *out_handle);
-static void example_adc_calibration_deinit(adc_cali_handle_t handle);
+//static bool example_adc_calibration_init(adc_unit_t unit, adc_atten_t atten, adc_cali_handle_t *out_handle);
+//static void example_adc_calibration_deinit(adc_cali_handle_t handle);
 
-static adc_oneshot_unit_handle_t adc1_handle;
-static adc_cali_handle_t adc1_cali_handle = NULL;
+//static adc_oneshot_unit_handle_t adc1_handle;
+//static adc_cali_handle_t adc1_cali_handle = NULL;
 static bool do_calibration1;
 
 #if CONFIG_IDF_TARGET_ESP32
 static const adc_bitwidth_t width = ADC_BITWIDTH_12;
-#elif CONFIG_IDF_TARGET_ESP32S2
+#elif CONFIG_IDF_TARGET_ESP32C3
 // 13bit ADC will cause issues with battery voltage formula
-static const adc_bitwidth_t width = ADC_BITWIDTH_12;
+//static const adc_bitwidth_t width = ADC_BITWIDTH_12;
 #endif
-static const adc_atten_t atten = ADC_ATTEN_DB_12;
+//static const adc_atten_t atten = ADC_ATTEN_DB_12;
 
 
 static int adc_raw_battery;
@@ -119,13 +119,14 @@ int8_t bus_write(uint8_t reg_addr, const uint8_t *reg_data_ptr, uint32_t data_le
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
     assert(data_len > 0 && reg_data_ptr != NULL); // Safeguarding the assumptions
     i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (0x76 << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, (0x77 << 1) | I2C_MASTER_WRITE, true);
     i2c_master_write_byte(cmd, reg_addr, true);
     i2c_master_write(cmd, reg_data_ptr, data_len, true);
     i2c_master_stop(cmd);
     esp_err_t ret = i2c_master_cmd_begin(ACTIVE_I2C, cmd, pdMS_TO_TICKS(1000));
     i2c_cmd_link_delete(cmd);
     // ESP_OK matches with the function success code (0)
+    ESP_LOGI("TAG", "End of bus write ############");
     return (int8_t)ret;
     return 0;
 }
@@ -147,18 +148,20 @@ int8_t bus_read(uint8_t reg_addr, uint8_t *reg_data_ptr, uint32_t data_len, void
     // ...
     // Please insert system specific function to read from bus where BME680 is connected
     // ...
+    ESP_LOGI("TAG", "Start of bus read ############");
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
 
     assert(data_len > 0 && reg_data_ptr != NULL); // Safeguarding the assumptions
     // Feeding the command in
     i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (0x76 << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, (0x77 << 1) | I2C_MASTER_WRITE, true);
     i2c_master_write_byte(cmd, reg_addr, true);
 
     //bme680_sleep(150);
+    vTaskDelay(1000);
     // Reading data back
     i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (0x76 << 1) | I2C_MASTER_READ, true);
+    i2c_master_write_byte(cmd, (0x77 << 1) | I2C_MASTER_READ, true);
     if (data_len > 1) {
         i2c_master_read(cmd, reg_data_ptr, data_len - 1, I2C_MASTER_ACK);
     }
@@ -167,6 +170,7 @@ int8_t bus_read(uint8_t reg_addr, uint8_t *reg_data_ptr, uint32_t data_len, void
     esp_err_t ret = i2c_master_cmd_begin(ACTIVE_I2C, cmd, pdMS_TO_TICKS(1000));
     i2c_cmd_link_delete(cmd);
     // ESP_OK matches with the function success code (0)
+    ESP_LOGI("TAG", "End of bus read ############");
     return (int8_t)ret;
     //return 0;
 }
@@ -222,13 +226,13 @@ static hd44780_t lcd = {
     .font = HD44780_FONT_5X8,
     .lines = 2,
     .pins = {
-        .rs = GPIO_NUM_19,
-        .e  = GPIO_NUM_23,
-        .d4 = GPIO_NUM_18,
-        .d5 = GPIO_NUM_17,
-        .d6 = GPIO_NUM_16,
-        .d7 = GPIO_NUM_15,
-        .bl = HD44780_NOT_USED
+        .rs = 20,
+        .e  = 23,
+        .d4 = 19,
+        .d5 = 17,
+        .d6 = 16,
+        .d7 = 15,
+        .bl = 14
     }
 };
 
@@ -253,12 +257,12 @@ void output_ready(int64_t timestamp, float iaq, uint8_t iaq_accuracy, float siaq
     
     ESP_LOGI("BME 680", "[timestamp: %"PRId64"] [IAQ reading: %f] [IAQ Accuracy: %d] [SIAQ reading: %f] [sIAQ Accuracy: %d] [Compensated Temperature: %f] [Compensated Humidity: %f] [raw_pressure: %f] [raw_temp: %f] [raw_humidity: %f] [raw_gas: %f] [co2_equivalent: %f] [bVOC: %f] [bsec_status: %d]\n", timestamp, iaq, iaq_accuracy, siaq, siaq_accuracy, compensateTemperature, compensateHumidity, raw_pressure, raw_temp, raw_humidity, raw_gas, co2, bVOC, bsec_status);
 
-    ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, LDR_ADC_CHANNEL, &adc_raw_LDR));
-    ESP_LOGI(TAG, "ADC%d Channel[%d] LDR Raw Data: %d", ADC_UNIT_1 + 1, LDR_ADC_CHANNEL, adc_raw_LDR);
+    //ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, LDR_ADC_CHANNEL, &adc_raw_LDR));
+    //ESP_LOGI(TAG, "ADC%d Channel[%d] LDR Raw Data: %d", ADC_UNIT_1 + 1, LDR_ADC_CHANNEL, adc_raw_LDR);
     // for this use case, raw data is more useful. this ldr is pretty useless for this though
     if (do_calibration1) {
-        ESP_ERROR_CHECK(adc_cali_raw_to_voltage(adc1_cali_handle, adc_raw_LDR, &adc_cali_LDR));
-        ESP_LOGI(TAG, "ADC%d Channel[%d] Cali LDR Voltage: %d mV", ADC_UNIT_1 + 1, LDR_ADC_CHANNEL, adc_cali_LDR);
+       // ESP_ERROR_CHECK(adc_cali_raw_to_voltage(adc1_cali_handle, adc_raw_LDR, &adc_cali_LDR));
+       // ESP_LOGI(TAG, "ADC%d Channel[%d] Cali LDR Voltage: %d mV", ADC_UNIT_1 + 1, LDR_ADC_CHANNEL, adc_cali_LDR);
     }
 
     time(&now);
@@ -413,6 +417,7 @@ uint32_t state_load(uint8_t *state_buffer, size_t n_buffer)
     // Return zero if loading was unsuccessful or no state was available,
     // otherwise return length of loaded state string.
     // ...
+    ESP_LOGI(TAG, "loading sensor binary blob ######");
     nvs_handle_t my_handle;
     esp_err_t err = nvs_open("state", NVS_READONLY, &my_handle);
     //ESP_ERROR_CHECK( err );
@@ -421,6 +426,7 @@ uint32_t state_load(uint8_t *state_buffer, size_t n_buffer)
     // We close this anyway even if the operation didn't succeed.
     nvs_close(my_handle);
     if (err == ESP_OK){
+        ESP_LOGI(TAG, "loaded sensor binary !!!!");
         return n_buffer;
     }
     ESP_LOGW(TAG, "loading sensor binary blob failed with code %d", err);
@@ -440,6 +446,7 @@ void state_save(const uint8_t *state_buffer, uint32_t length)
     // ...
     // Save the string some form of non-volatile memory, if possible.
     // ...
+    ESP_LOGI(TAG, "Saving state .........");
     nvs_handle_t my_handle;
     esp_err_t err = nvs_open("state", NVS_READWRITE, &my_handle);
     ESP_ERROR_CHECK( err );
@@ -470,7 +477,7 @@ uint32_t config_load(uint8_t *config_buffer, uint32_t n_buffer)
     ESP_LOGI(TAG, "Loading configuration: buffer-size %" PRIu32 "  config size %d", n_buffer, sizeof(bsec_config_iaq));
     assert(n_buffer >= sizeof(bsec_config_iaq));
     memcpy(config_buffer, bsec_config_iaq, sizeof(bsec_config_iaq));
-
+    ESP_LOGI(TAG, "Loaded configuration #######");
     return sizeof(bsec_config_iaq);
 }
 
@@ -511,7 +518,7 @@ int initialize_sensor()
     /* Call to the function which initializes the BSEC library BSEC_SAMPLE_RATE_SCAN
      * Switch on low-power mode and provide no temperature offset BSEC_SAMPLE_RATE_LP */ //BSEC_SAMPLE_RATE_ULP
     //void bsec_iot_init(float sample_rate, float temperature_offset, bme68x_write_fptr_t bus_write, bme68x_read_fptr_t bus_read, sleep_fct sleep_n, state_load_fct state_load, config_load_fct config_load, struct bme68x_dev dev);
-    ret = bsec_iot_init(BSEC_SAMPLE_RATE_LP, 2.0f, bus_write, bus_read, bme680_sleep, state_load, config_load, bme_dev);
+    ret = bsec_iot_init(BSEC_SAMPLE_RATE_LP, 0.0f, bus_write, bus_read, bme680_sleep, state_load, config_load, bme_dev);
     if (ret.bme68x_status)
     {
         /* Could not initialize BME680 */
@@ -560,7 +567,7 @@ static void reset_key_init(uint32_t key_gpio_pin)
     iot_button_add_on_press_cb(handle, RESET_TO_FACTORY_BUTTON_TIMEOUT, reset_to_factory_handler, NULL);
 }
 
-static uint8_t get_battery_level(void)
+/*static uint8_t get_battery_level(void)
 {
     float percentage = 100;
     ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, CONFIG_BATTERY_ADC_CHANNEL, &adc_raw_battery
@@ -587,7 +594,7 @@ static uint8_t get_battery_level(void)
     else if (voltage_f <= 3.50) percentage = 0.0;
     ESP_LOGI(TAG, "Battery Level %0.01f%%", percentage);
     return percentage;
-}
+}*/
 
 /* Mandatory identify routine for the accessory.
  * In a real accessory, something like LED blink should be implemented
@@ -671,22 +678,22 @@ static void temp_thread_entry(void *p)
     // new implementation
     //-------------ADC1 Init---------------//
 
-    adc_oneshot_unit_init_cfg_t init_config1 = {
+    /*adc_oneshot_unit_init_cfg_t init_config1 = {
         .unit_id = ADC_UNIT_1,
-    };
-    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config1, &adc1_handle));
+    };*/
+    //ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config1, &adc1_handle));
 
     //-------------ADC1 Config---------------//
-    adc_oneshot_chan_cfg_t config = {
+    /*adc_oneshot_chan_cfg_t config = {
         .bitwidth = width,
         .atten = atten,
-    };
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, CONFIG_BATTERY_ADC_CHANNEL, &config));
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, LDR_ADC_CHANNEL, &config));
+    };*/
+    //ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, CONFIG_BATTERY_ADC_CHANNEL, &config));
+    //ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, LDR_ADC_CHANNEL, &config));
 
     //-------------ADC1 Calibration Init---------------//
-    do_calibration1 = example_adc_calibration_init(ADC_UNIT_1, atten, &adc1_cali_handle);
-    ESP_LOGI(TAG, "Battery Level ADC running on GPIO %d", adc_gpio_num);
+    //do_calibration1 = example_adc_calibration_init(ADC_UNIT_1, atten, &adc1_cali_handle);
+    //ESP_LOGI(TAG, "Battery Level ADC running on GPIO %d", adc_gpio_num);
 
     /* Configure HomeKit core to make the Accessory name (and thus the WAC SSID) unique,
      * instead of the default configuration wherein only the WAC SSID is made unique.
@@ -775,12 +782,12 @@ static void temp_thread_entry(void *p)
     }    
 
     
-    u_int8_t battery_level = get_battery_level();
-    ESP_LOGI(TAG, "Creating battery service (current battery level: %d)", battery_level);
+    //u_int8_t battery_level = get_battery_level();
+    //ESP_LOGI(TAG, "Creating battery service (current battery level: %d)", battery_level);
     // Create the CloseIf switch
-    battery_service = hap_serv_battery_service_create(battery_level, 0, (battery_level<25)?1:0);
-    hap_serv_add_char(battery_service, hap_char_name_create("ESP Battery Level"));
-    hap_acc_add_serv(tempaccessory, battery_service);
+    //battery_service = hap_serv_battery_service_create(battery_level, 0, (battery_level<25)?1:0);
+    //hap_serv_add_char(battery_service, hap_char_name_create("ESP Battery Level"));
+    //hap_acc_add_serv(tempaccessory, battery_service);
 
 
 #if 0
@@ -870,7 +877,7 @@ static void bSECReadTask(void *p)
 
 // ADC calibration init function declaration
 // ripped from https://github.com/espressif/esp-idf/blob/release/v5.0/examples/peripherals/adc/oneshot_read/main/oneshot_read_main.c
-static bool example_adc_calibration_init(adc_unit_t unit, adc_atten_t atten, adc_cali_handle_t *out_handle)
+/*static bool example_adc_calibration_init(adc_unit_t unit, adc_atten_t atten, adc_cali_handle_t *out_handle)
 {
     adc_cali_handle_t handle = NULL;
     esp_err_t ret = ESP_FAIL;
@@ -916,9 +923,9 @@ static bool example_adc_calibration_init(adc_unit_t unit, adc_atten_t atten, adc
     }
 
     return calibrated;
-}
+}*/
 
-static void example_adc_calibration_deinit(adc_cali_handle_t handle)
+/*static void example_adc_calibration_deinit(adc_cali_handle_t handle)
 {
 #if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
     ESP_LOGI(TAG, "deregister %s calibration scheme", "Curve Fitting");
@@ -928,7 +935,7 @@ static void example_adc_calibration_deinit(adc_cali_handle_t handle)
     ESP_LOGI(TAG, "deregister %s calibration scheme", "Line Fitting");
     ESP_ERROR_CHECK(adc_cali_delete_scheme_line_fitting(handle));
 #endif
-}
+}*/
 
 void app_main()
 {

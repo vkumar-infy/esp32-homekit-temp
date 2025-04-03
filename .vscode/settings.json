@@ -1,10 +1,41 @@
 {
-    "idf.espIdfPath": "/Users/mark/esp-idf",
-    "idf.toolsPath": "/Users/mark/.espressif",
-    "idf.customExtraPaths": ".:/usr/local/bin:/Users/mark/.espressif/tools/xtensa-esp32-elf/esp-2020r2-8.2.0/xtensa-esp32-elf/bin:/Users/mark/.espressif/tools/xtensa-esp32s2-elf/esp-2020r2-8.2.0/xtensa-esp32s2-elf/bin:/Users/mark/.espressif/tools/esp32ulp-elf/2.28.51-esp-20191205/esp32ulp-elf-binutils/bin:/Users/mark/.espressif/tools/esp32s2ulp-elf/2.28.51-esp-20191205/esp32s2ulp-elf-binutils/bin:/Users/mark/.espressif/tools/openocd-esp32/v0.10.0-esp32-20200420/openocd-esp32/bin",
-    "idf.customExtraVars": "{\"OPENOCD_SCRIPTS\":\"/Users/mark/.espressif/tools/openocd-esp32/v0.10.0-esp32-20200420/openocd-esp32/share/openocd/scripts\"}",
+    "idf.espIdfPath": "/Users/vinodkumarch/Dev/esp-idf",
+    "idf.toolsPath": "/Users/vinodkumarch/.espressif",
+    "idf.customExtraPaths": "/Users/vinodkumarch/.espressif/tools/xtensa-esp-elf-gdb/12.1_20221002/xtensa-esp-elf-gdb/bin:/Users/vinodkumarch/.espressif/tools/riscv32-esp-elf-gdb/12.1_20221002/riscv32-esp-elf-gdb/bin:/Users/vinodkumarch/.espressif/tools/xtensa-esp32-elf/esp-12.2.0_20230208/xtensa-esp32-elf/bin:/Users/vinodkumarch/.espressif/tools/xtensa-esp32s2-elf/esp-12.2.0_20230208/xtensa-esp32s2-elf/bin:/Users/vinodkumarch/.espressif/tools/xtensa-esp32s3-elf/esp-12.2.0_20230208/xtensa-esp32s3-elf/bin:/Users/vinodkumarch/.espressif/tools/riscv32-esp-elf/esp-12.2.0_20230208/riscv32-esp-elf/bin:/Users/vinodkumarch/.espressif/tools/esp32ulp-elf/2.35_20220830/esp32ulp-elf/bin:/Users/vinodkumarch/.espressif/tools/cmake/3.24.0/CMake.app/Contents/bin:/Users/vinodkumarch/.espressif/tools/openocd-esp32/v0.12.0-esp32-20230921/openocd-esp32/bin:/Users/vinodkumarch/.espressif/tools/ninja/1.10.2:/Users/vinodkumarch/.espressif/tools/esp-rom-elfs/20230320",
+    "idf.customExtraVars": {
+        "OPENOCD_SCRIPTS": "/Users/vinodkumarch/.espressif/tools/openocd-esp32/v0.12.0-esp32-20230921/openocd-esp32/share/openocd/scripts",
+        "ESP_ROM_ELF_DIR": "/Users/vinodkumarch/.espressif/tools/esp-rom-elfs/20230320/"
+    },
     "cmake.configureOnOpen": false,
-    "idf.port": "/dev/cu.usbserial-31301",
-    "idf.adapterTargetName": "esp32",
-    "idf.baudRate": "115200"
+    "idf.port": "/dev/tty.usbserial-84130",
+    "idf.adapterTargetName": "esp32c3",
+    "idf.baudRate": "115200",
+    "files.exclude": {
+        "**/.git": true,
+        "**/.svn": true,
+        "**/.hg": true,
+        "**/CVS": true,
+        "**/.DS_Store": true,
+        "**/Thumbs.db": true,
+        "**/.apivcs": true,
+        "**/.gitignore": true,
+        "**/.designer.json": true,
+        "**/.exchange.xml": true,
+        "**/.vscode": true,
+        "**/.mvn": true,
+        "**/.exchange_modules_tmp": true,
+        ".mule": true
+    },
+    "files.associations": {
+        "**/src/main/resources/deploy.json": "json",
+        "bsec_integration.h": "c",
+        "ostream": "c",
+        "hap_apple_servs.h": "c",
+        "esp_sntp.h": "c",
+        "complex": "c"
+    },
+    "idf.pythonBinPath": "/Users/vinodkumarch/.espressif/python_env/idf5.1_py3.12_env/bin/python",
+    "idf.gitPath": "/usr/bin/git",
+    "idf.pythonInstallPath": "/opt/homebrew/opt/python@3.12/Frameworks/Python.framework/Versions/3.12/bin/python3",
+    "idf.flashType": "UART"
 }

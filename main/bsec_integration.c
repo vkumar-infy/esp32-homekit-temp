@@ -118,6 +118,7 @@ uint8_t nFields, iFields;
  */
 static bsec_library_return_t bme68x_bsec_update_subscription(float sample_rate)
 {
+    printf("INFO: update subscription called");
     bsec_sensor_configuration_t requested_virtual_sensors[NUM_USED_OUTPUTS];
     uint8_t n_requested_virtual_sensors = NUM_USED_OUTPUTS;
     
@@ -233,11 +234,12 @@ return_values_init bsec_iot_init(float sample_rate, float temperature_offset, bm
     bsec_state_len = state_load(bsec_state, sizeof(bsec_state));
     if (bsec_state_len != 0)
     {       
-        ret.bsec_status = bsec_set_state(bsec_state, bsec_state_len, work_buffer, sizeof(work_buffer));     
-        if (ret.bsec_status != BSEC_OK)
+       // ret.bsec_status = bsec_set_state(bsec_state, bsec_state_len, work_buffer, sizeof(work_buffer));     
+        /*if (ret.bsec_status != BSEC_OK)
         {
+            printf("ERROR: Unable to load state ######^^^^^^^");
             return ret;
-        }
+        }*/
     }
     
     /* Call to the function which sets the library with subscription information */
